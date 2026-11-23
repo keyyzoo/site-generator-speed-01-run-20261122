@@ -276,32 +276,37 @@ const ESCAPABLE = new Uint8Array(128);
 for (const ch of '\\`*_[]()#+-.!>') ESCAPABLE[ch.charCodeAt(0)] = 1;
 const isEscapable = (code) => code < 128 && ESCAPABLE[code] === 1;
 
+/** Whether position `j` is the second half of a backslash escape pair, scanning
+ * from `from`. Escape pairs form greedily left to right, so a run of k backslashes
+ * ending just before `j` pairs up from its start: `j` is covered exactly when
+ * the run (counted back to `from`) has odd length. */
+function isEscapedAt(s, j, from) {
+  let k = 0;
+  for (let p = j - 1; p >= from && s[p] === '\\'; p--) k++;
+  return k % 2 === 1;
+}
+
 /** First index from `from` where `s` holds `what` outside a backslash escape, or -1. */
 function findUnescaped(s, what, from) {
-  for (let j = from; j <= s.length - what.length; j++) {
-    if (s[j] === '\\' && j + 1 < s.length && isEscapable(s.charCodeAt(j + 1))) {
-      j++;
-      continue;
-    }
-    if (s.startsWith(what, j)) return j;
+  let j = s.indexOf(what, from);
+  while (j !== -1) {
+    if (!isEscapedAt(s, j, from)) return j;
+    j = s.indexOf(what, j + 1);
   }
   return -1;
 }
 
 /** First single * from `from` (one whose run is not **), outside an escape, or -1. */
 function findSingleStar(s, from) {
-  for (let j = from; j < s.length; j++) {
-    const c = s[j];
-    if (c === '\\' && j + 1 < s.length && isEscapable(s.charCodeAt(j + 1))) {
-      j++;
-      continue;
+  let j = s.indexOf('*', from);
+  while (j !== -1) {
+    if (isEscapedAt(s, j, from)) {
+      j = s.indexOf('*', j + 1);
+    } else if (s[j + 1] === '*') {
+      j = s.indexOf('*', j + 2);
+    } else {
+      return j;
     }
-    if (c !== '*') continue;
-    if (s[j + 1] === '*') {
-      j++;
-      continue;
-    }
-    return j;
   }
   return -1;
 }

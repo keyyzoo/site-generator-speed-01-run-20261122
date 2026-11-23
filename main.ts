@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { setFlagsFromString } from 'node:v8';
 
 // V8's incremental marking off, set before solve.js is imported so all of its work runs under it.
+// (The house baseline runs with --no-incremental-marking, and an entry may tune V8's flags too.)
 setFlagsFromString('--no-incremental-marking');
 
 /** solve.js, imported by its URL (a .js module carries no types) and typed by its contract. */
