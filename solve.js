@@ -10,8 +10,11 @@ const RESERVED = ['posts', 'tags', 'page'];
 
 const byCodeUnits = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
-/** HTML escape: & < > " ' — one pass, returns the input untouched when nothing needs escaping. */
+const ESC_TEST = /[&<>"']/;
+
+/** HTML escape: & < > " ' — a C++ scan first; untouched input returned as-is when nothing needs escaping. */
 export function escapeHtml(s) {
+  if (!ESC_TEST.test(s)) return s;
   let out = '';
   let start = 0;
   for (let i = 0; i < s.length; i++) {
@@ -27,7 +30,6 @@ export function escapeHtml(s) {
     out += ent;
     start = i + 1;
   }
-  if (start === 0) return s;
   if (start < s.length) out += s.slice(start);
   return out;
 }
@@ -246,7 +248,16 @@ function isHr(line) {
 
 /** Whether `line` ends a paragraph. */
 function endsParagraph(line) {
-  return isBlank(line) || fenceOpen(line) !== null || headingOf(line) !== null || isHr(line);
+  // First-character dispatch: only the check that can match this line runs.
+  // (A line opening on a space or tab can only be blank; any other opener rules
+  // out the checks anchored at the line's start, so this is exactly the four-way test.)
+  if (line.length === 0) return true;
+  const c = line.charCodeAt(0);
+  if (c === 32 || c === 9) return isBlank(line);
+  if (c === 96) return fenceOpen(line) !== null;
+  if (c === 35) return headingOf(line) !== null;
+  if (c === 45 || c === 42) return isHr(line);
+  return false;
 }
 
 const CONTINUED = /^ {2,}\S/;
@@ -296,107 +307,79 @@ function findSingleStar(s, from) {
 }
 
 const WS_RE = /\s/;
+const INLINE_SPECIAL = /[\\`*[]/;
 
 /** `s` rendered inline; `env.link(target)` is a link's href. */
 function inline(s, env) {
+  // Fast path: no inline construct can start here, so this is plain escaped text.
+  if (!INLINE_SPECIAL.test(s)) return escapeHtml(s);
+  // Slow path: jump from one significant character to the next with a regex
+  // (a C++ scan), pushing the plain runs between them untouched — they hold no
+  // character that needs escaping, since the class covers all of them.
   const out = [];
-  const len = s.length;
+  const next = /[\\`*\[&<>"']/g;
   let i = 0;
-  let start = 0;
-  const flush = (to) => {
-    if (to > start) out.push(escapeHtml(s.slice(start, to)));
-  };
-  while (i < len) {
-    const c = s[i];
-    if (c === '\\' && i + 1 < len && isEscapable(s.charCodeAt(i + 1))) {
-      flush(i);
-      const n = s[i + 1];
-      out.push(n === '>' ? '&gt;' : n);
-      i += 2;
-      start = i;
-      continue;
-    }
-    if (c === '`') {
-      const j = s.indexOf('`', i + 1);
-      if (j > i + 1) {
-        flush(i);
-        out.push('<code>', escapeHtml(s.slice(i + 1, j)), '</code>');
+  let m;
+  while ((m = next.exec(s)) !== null) {
+    const j = m.index;
+    const c = m[0];
+    if (j > i) out.push(s.slice(i, j));
+    if (c === '\\') {
+      if (j + 1 < s.length && isEscapable(s.charCodeAt(j + 1))) {
+        const n = s[j + 1];
+        out.push(n === '>' ? '&gt;' : n);
+        i = j + 2;
+      } else {
+        out.push('\\');
         i = j + 1;
-        start = i;
-      } else i++;
-      continue;
-    }
-    if (c === '*') {
-      if (s[i + 1] === '*') {
-        const j = findUnescaped(s, '**', i + 2);
-        if (j > i + 2) {
-          flush(i);
-          out.push('<strong>', inline(s.slice(i + 2, j), env), '</strong>');
-          i = j + 2;
-          start = i;
-        } else i += 2;
-        continue;
       }
-      const j = findSingleStar(s, i + 1);
-      if (j > i + 1) {
-        flush(i);
-        out.push('<em>', inline(s.slice(i + 1, j), env), '</em>');
+    } else if (c === '`') {
+      const k = s.indexOf('`', j + 1);
+      if (k > j + 1) {
+        out.push('<code>', escapeHtml(s.slice(j + 1, k)), '</code>');
+        i = k + 1;
+      } else {
+        out.push('`');
         i = j + 1;
-        start = i;
-      } else i++;
-      continue;
-    }
-    if (c === '[') {
-      const k = findUnescaped(s, ']', i + 1);
-      const m = k !== -1 && s[k + 1] === '(' ? s.indexOf(')', k + 2) : -1;
-      const target = m === -1 ? '' : s.slice(k + 2, m);
+      }
+    } else if (c === '*') {
+      if (s[j + 1] === '*') {
+        const k = findUnescaped(s, '**', j + 2);
+        if (k > j + 2) {
+          out.push('<strong>', inline(s.slice(j + 2, k), env), '</strong>');
+          i = k + 2;
+        } else {
+          out.push('**');
+          i = j + 2;
+        }
+      } else {
+        const k = findSingleStar(s, j + 1);
+        if (k > j + 1) {
+          out.push('<em>', inline(s.slice(j + 1, k), env), '</em>');
+          i = k + 1;
+        } else {
+          out.push('*');
+          i = j + 1;
+        }
+      }
+    } else if (c === '[') {
+      const k = findUnescaped(s, ']', j + 1);
+      const q = k !== -1 && s[k + 1] === '(' ? s.indexOf(')', k + 2) : -1;
+      const target = q === -1 ? '' : s.slice(k + 2, q);
       if (target !== '' && !WS_RE.test(target)) {
-        flush(i);
-        out.push('<a href="', escapeHtml(env.link(target)), '">', inline(s.slice(i + 1, k), env), '</a>');
-        i = m + 1;
-        start = i;
-      } else i++;
-      continue;
+        out.push('<a href="', escapeHtml(env.link(target)), '">', inline(s.slice(j + 1, k), env), '</a>');
+        i = q + 1;
+      } else {
+        out.push('[');
+        i = j + 1;
+      }
+    } else {
+      out.push(c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;');
+      i = j + 1;
     }
-    const cc = s.charCodeAt(i);
-    if (cc === 38) {
-      flush(i);
-      out.push('&amp;');
-      i++;
-      start = i;
-      continue;
-    }
-    if (cc === 60) {
-      flush(i);
-      out.push('&lt;');
-      i++;
-      start = i;
-      continue;
-    }
-    if (cc === 62) {
-      flush(i);
-      out.push('&gt;');
-      i++;
-      start = i;
-      continue;
-    }
-    if (cc === 34) {
-      flush(i);
-      out.push('&quot;');
-      i++;
-      start = i;
-      continue;
-    }
-    if (cc === 39) {
-      flush(i);
-      out.push('&#39;');
-      i++;
-      start = i;
-      continue;
-    }
-    i++;
+    next.lastIndex = i;
   }
-  flush(len);
+  if (i < s.length) out.push(s.slice(i));
   return out.join('');
 }
 
@@ -689,8 +672,24 @@ function renderNodes(nodes, scope, ctx, depth, out) {
 
 /** The words of a body: its runs of characters other than whitespace. */
 function wordsOf(text) {
-  const m = text.match(/\S+/g);
-  return m === null ? 0 : m.length;
+  // One allocation-free pass. The whitespace set below is exactly JavaScript's
+  // \s (ASCII whitespace plus U+00A0, U+1680, U+2000–U+200A, U+2028, U+2029,
+  // U+202F, U+205F, U+3000, U+FEFF); every other code unit, surrogate halves
+  // included, is a word character — so this counts exactly what /\S+/g counts.
+  let count = 0;
+  let inWord = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    const ws = c === 32 || c === 9 || c === 10 || c === 11 || c === 12 || c === 13 ||
+      c === 0xA0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200A) || c === 0x2028 || c === 0x2029 ||
+      c === 0x202F || c === 0x205F || c === 0x3000 || c === 0xFEFF;
+    if (ws) inWord = false;
+    else if (!inWord) {
+      inWord = true;
+      count++;
+    }
+  }
+  return count;
 }
 
 /** `rel` from the directory `dir` of a source, or null when it climbs out of the root. */
@@ -820,6 +819,9 @@ export function run(input) {
     s.html = md.html;
     s.toc = md.toc;
     s.excerpt = md.excerpt;
+    // Reading time depends only on the body, so count its words once here:
+    // a card is built twice for every post (once for the lists, once for its page).
+    s.reading = Math.max(1, Math.ceil(wordsOf(s.body) / 200));
   }
 
   // 5. Collections: posts newest first, then by slug; newer/older neighbours.
@@ -859,7 +861,7 @@ export function run(input) {
     date_long: s.data.date === undefined ? '' : longDate(s.data.date),
     summary: s.data.summary ?? '',
     excerpt: s.excerpt,
-    reading_minutes: Math.max(1, Math.ceil(wordsOf(s.body) / 200)),
+    reading_minutes: s.reading,
     tags: s.tagRefs.map((t) => ({ name: t.name, slug: t.slug, url: t.url })),
   });
   const cards = new Map(posts.map((p) => [p, cardOf(p)]));
